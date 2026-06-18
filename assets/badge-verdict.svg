@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="28" role="img" aria-label="Verdict: foresight is not a tradeable edge, DSR ~ 0">
+  <rect width="400" height="28" rx="4" fill="#0E0C14"/>
+  <rect x="200" width="200" height="28" rx="4" fill="#7A6177"/>
+  <rect x="200" width="10" height="28" fill="#7A6177"/>
+  <text x="16" y="19" font-family="'JetBrains Mono', monospace" font-size="13" fill="#A78AA3" letter-spacing="1">VALIDATION GATE</text>
+  <text x="214" y="19" font-family="'JetBrains Mono', monospace" font-size="13" font-weight="bold" fill="#F3EFE8">FAIL · DSR ~ 0</text>
+</svg>

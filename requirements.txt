@@ -1,0 +1,8 @@
+# DeepLOB + OFI microstructure — research-only dependencies.
+# No broker SDK, no data-vendor client. The demo runs on synthetic data.
+torch>=2.0
+numpy>=1.24
+pandas>=2.0
+matplotlib>=3.7
+numba>=0.58        # optional: accelerates the OFI backtest; pure-python fallback exists
+pytest>=7.0        # tests only

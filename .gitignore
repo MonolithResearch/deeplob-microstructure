@@ -1,0 +1,35 @@
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+.venv/
+venv/
+env/
+
+# ── Models / checkpoints ──────────────────────────────────────────────────────
+*.pt
+*.pth
+*.ckpt
+*.npz
+
+# ── LICENSED / RAW MARKET DATA — never commit ─────────────────────────────────
+# Databento, CRSP/Compustat (WRDS), OANDA, IBKR exports, etc. are proprietary.
+# Only methodology + summary statistics belong in this public repo.
+*.dbn
+*.dbn.zst
+*.parquet
+*.feather
+data/
+databento/
+raw/
+
+# ── Generated demo artifacts (regenerate locally; the README chart is kept) ───
+docs/results/demo_*.png
+
+# ── OS / editor ───────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
