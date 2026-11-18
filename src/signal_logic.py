@@ -6,10 +6,8 @@ The research strategy enters only when BOTH gates pass:
     2. order-flow gate:    |ofi_z| > ofi_threshold
     3. agreement:          (P_UP > P_DOWN and ofi_z > 0) or (P_DOWN > P_UP and ofi_z < 0)
 
-The default ``contrarian`` mode fades the agreed direction — short-horizon OFI on
-this data is mean-reverting (the same-bar OFI/return correlation is ~+0.86, but by
-the next 5-second bar it has fully dissipated; see docs/RESULTS.md). ``trend`` mode
-takes the agreed direction instead, and is provided for comparison.
+The default ``contrarian`` mode fades the agreed direction. The ``trend`` mode
+takes the agreed direction. See docs/RESULTS.md for the empirical status.
 """
 from __future__ import annotations
 

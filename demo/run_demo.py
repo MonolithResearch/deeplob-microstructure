@@ -9,15 +9,8 @@ Pipeline:
     5. run the HONEST no-lookahead OFI out-of-sample backtest
     6. render a Monolith-branded chart of the OOS equity (gross vs net)
 
-The point of the demo is NOT to make money on toy data. It is to show the
-machinery end-to-end and to reproduce the qualitative lesson the real research
-proved on genuine CME 6E (EUR futures) Databento data:
-
-    In-sample fitting manufactures an "edge" that does not survive realistic
-    transaction costs out-of-sample. Foresight is not a tradeable edge.
-
-The authoritative numbers from the REAL data are in ../docs/RESULTS.md and the
-README. The synthetic run below is illustrative only.
+The simulated returns illustrate the accounting. The status of the historical
+licensed-data results is documented in docs/RESULTS.md.
 
 Usage:
     py -3.14 demo/run_demo.py            # full demo (trains a tiny model)
@@ -42,7 +35,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from src.synthetic_lob import generate_synthetic_lob
-from src.lob_features import compute_features, compute_labels, FEATURE_NAMES
+from src.lob_features import clock_starts, compute_features, compute_labels, FEATURE_NAMES
 from src.honest_oos import run_honest_oos
 from src import brand
 
@@ -111,8 +104,10 @@ def main():
     lob = generate_synthetic_lob(n_bars=args.bars, seed=args.seed, ofi_signal=args.ofi_signal)
     print(f"      LOB shape {lob.shape}  span {lob.index.min()} -> {lob.index.max()}")
 
-    print("\n[2/5] Computing 40-channel DeepLOB features + OFI z-score ...")
-    feats = compute_features(lob)
+    print("\n[2/5] Computing model features on the first contiguous segment ...")
+    starts = clock_starts(lob.index)
+    first_stop = starts[1] if len(starts) > 1 else len(lob)
+    feats = compute_features(lob.iloc[:first_stop])
     print(f"      feature frame {feats.shape}  "
           f"median spread bp = {float(feats['spread_bps'].median()):.3f}")
 
@@ -140,9 +135,7 @@ def main():
     print(f"     gross > cost? : {res['gross_gt_cost']}")
     print(f"     VERDICT       : {res['verdict']}")
     print("  --------------------------------------------------------------------")
-    print("  Note: this is SYNTHETIC toy data. The authoritative result on real")
-    print("  CME 6E Databento LOB is IS Sharpe 10.81 -> net Sharpe -14.63 at 3x")
-    print("  cost over 2,264 trades (DSR ~ 0). See README / docs/RESULTS.md.")
+    print("  Synthetic results only. See docs/RESULTS.md for the historical correction.")
 
     _plot_equity(res, args.out)
     print(f"\n  Chart written -> {args.out}")
@@ -152,25 +145,21 @@ def _plot_equity(res, out_path):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    import pandas as pd
-
     brand.apply_brand(plt)
     tr = res["oos_trades"]
     if len(tr["net_bp"]) == 0:
         print("   (no OOS trades to plot)")
         return
-    idx = pd.to_datetime(np.asarray(tr["exit_ts"]) * 1e9, utc=True)
-    eq = pd.DataFrame({"gross": np.cumsum(tr["gross_bp"]),
-                       "net": np.cumsum(tr["net_bp"])}, index=idx).sort_index()
+    eq = res["oos_marks"].cumsum()
 
     fig, ax = plt.subplots(figsize=(10, 5.5))
-    ax.plot(eq.index, eq["gross"], color=brand.PLUM, lw=1.6,
-            label="cumulative GROSS (bp) — the foresight")
-    ax.plot(eq.index, eq["net"], color=brand.INK, lw=1.8,
+    ax.plot(eq.index, eq["gross_bp"], color=brand.PLUM, lw=1.6,
+            label="cumulative gross (bp)")
+    ax.plot(eq.index, eq["net_bp"], color=brand.INK, lw=1.8,
             label="cumulative NET (bp) — after crossing the spread")
     ax.axhline(0, color=brand.PLUM_DARK, lw=0.8, ls="--", alpha=0.6)
-    ax.set_title("Foresight is not a tradeable edge — synthetic OFI OOS equity")
-    ax.set_xlabel("exit time (out-of-sample)")
+    ax.set_title("Synthetic OFI out-of-sample P&L")
+    ax.set_xlabel("snapshot time (UTC)")
     ax.set_ylabel("cumulative P&L (basis points)")
     ax.legend(loc="best", frameon=False)
     oos = res["oos_summary"]

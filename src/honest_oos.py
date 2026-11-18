@@ -14,11 +14,10 @@ NO-LOOKAHEAD CONTRACT
     Smoothing and z-score windows are causal (right-aligned rolling).
   - The position is decided at bar t from features <= t, filled at mid[t], held
     H bars, exited at mid[t+H]. Forward P&L is masked if the t -> t+H interval
-    crosses a time gap > GAP_SECONDS (no synthetic overnight P&L).
+    crosses a break in the five-second clock.
   - Cost = real top-of-book half-spread at entry + half-spread at exit (you cross
     the spread both ways) + a fixed commission. Charged per round trip.
-  - Holds are NON-OVERLAPPING, so trades are independent and the Sharpe is not
-    overlap-inflated.
+  - Holds do not overlap. Open trades are marked at each observed mid.
 
 This module works on any LOB snapshot DataFrame with the standard column schema
 (bid_px_00..09, ask_px_00..09, bid_sz_00..09, ask_sz_00..09) — the same schema the
@@ -36,11 +35,12 @@ except Exception:  # numba optional — fall back to a pure-python loop
     _HAVE_NUMBA = False
 
 from .config import (
-    N_LOB_LEVELS,
+    N_LOB_LEVELS, BAR_SECONDS,
     GAP_SECONDS,
     COMMISSION_BP_RT,
     IS_FRAC,
 )
+from .lob_features import clock_starts
 
 N_LEVELS = N_LOB_LEVELS
 
@@ -71,11 +71,8 @@ def compute_ofi_arrays(lob: pd.DataFrame):
     spread = best_ask - best_bid
     half_spread_bp = (spread / 2.0) / mid * 1e4
 
-    ts = lob.index.view("int64") / 1e9
-    dt_prev = np.empty_like(ts)
-    dt_prev[0] = np.inf
-    dt_prev[1:] = ts[1:] - ts[:-1]
-    gap_after_prev = dt_prev > GAP_SECONDS
+    starts = clock_starts(lob.index)
+    ts = lob.index.as_unit("ns").asi8 / 1e9
 
     ofi_lvl = np.zeros((len(lob), N_LEVELS), np.float64)
     for l in range(N_LEVELS):
@@ -89,8 +86,7 @@ def compute_ofi_arrays(lob: pd.DataFrame):
         ask_ofi = np.where(ap < ap_p, asz, np.where(ap > ap_p, -as_p, asz - as_p))
         ofi_lvl[:, l] = bid_ofi - ask_ofi
 
-    ofi_lvl[gap_after_prev, :] = np.nan
-    ofi_lvl[0, :] = np.nan
+    ofi_lvl[starts, :] = np.nan
     return mid, half_spread_bp, ofi_lvl, ts, spread
 
 
@@ -115,8 +111,10 @@ def rolling_z(x, win):
 # 2. Non-overlapping event backtest — per-trade arrays.
 # ─────────────────────────────────────────────────────────────────────────────
 def _run_trades_py(ofi_z, mid, half_spread_bp, ts, H, thr, commission_bp_rt,
-                   gap_s, start_i, end_i):
+                   gap_s, start_i, end_i, breaks=None):
     n = end_i - start_i
+    gross_steps = np.zeros(n)
+    net_steps = np.zeros(n)
     max_tr = n // H + 2
     out_ts = np.empty(max_tr); out_gross = np.empty(max_tr)
     out_net = np.empty(max_tr); out_cost = np.empty(max_tr)
@@ -132,12 +130,14 @@ def _run_trades_py(ofi_z, mid, half_spread_bp, ts, H, thr, commission_bp_rt,
         if not (np.isfinite(m0) and np.isfinite(m1)) or m0 <= 0.0:
             i += 1
             continue
-        spans_gap = False
+        valid_hold = True
         for u in range(i + 1, j + 1):
-            if ts[u] - ts[u - 1] > gap_s:
-                spans_gap = True
+            step = ts[u] - ts[u - 1]
+            if ((breaks is not None and breaks[u]) or step != BAR_SECONDS
+                    or step > gap_s or not np.isfinite(mid[u]) or mid[u] <= 0):
+                valid_hold = False
                 break
-        if spans_gap:
+        if not valid_hold:
             i += 1
             continue
         d = 1.0 if z > 0.0 else -1.0
@@ -150,36 +150,52 @@ def _run_trades_py(ofi_z, mid, half_spread_bp, ts, H, thr, commission_bp_rt,
         cost_bp = hs0 + hs1 + commission_bp_rt
         out_ts[k] = ts[j]; out_gross[k] = gross_bp
         out_net[k] = gross_bp - cost_bp; out_cost[k] = cost_bp
+        for u in range(i + 1, j + 1):
+            change = d * (mid[u] - mid[u - 1]) / m0 * 1e4
+            gross_steps[u - start_i] = change
+            net_steps[u - start_i] = change
+        net_steps[j - start_i] -= cost_bp
         out_dir[k] = int(d)
         k += 1
         i = j  # NON-OVERLAPPING
-    return out_ts[:k], out_gross[:k], out_net[:k], out_cost[:k], out_dir[:k]
+    return (out_ts[:k], out_gross[:k], out_net[:k], out_cost[:k], out_dir[:k],
+            gross_steps, net_steps)
 
 
 if _HAVE_NUMBA:
-    run_trades = njit(cache=True)(_run_trades_py)
+    _run_marked = njit(cache=True)(_run_trades_py)
 else:
-    run_trades = _run_trades_py
+    _run_marked = _run_trades_py
+
+
+def run_trades(ofi_z, mid, half_spread_bp, ts, H, thr, commission_bp_rt,
+               gap_s, start_i, end_i):
+    """Closed-trade ledger (exit seconds, gross bp, net bp, cost bp, direction)."""
+    return _run_marked(ofi_z, mid, half_spread_bp, ts, H, thr, commission_bp_rt,
+                       gap_s, start_i, end_i)[:5]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. Daily-resample Sharpe from per-trade net bp on exit timestamps.
+# 3. Daily Sharpe on the evaluation clock, including days without trades.
 # ─────────────────────────────────────────────────────────────────────────────
 def daily_sharpe(exit_ts_sec, pnl_bp, ppy: int = 252):
     if len(pnl_bp) < 3:
         return 0.0, 0
-    idx = pd.to_datetime(np.asarray(exit_ts_sec) * 1e9, utc=True)
+    if isinstance(exit_ts_sec, pd.DatetimeIndex):
+        idx = pd.to_datetime(exit_ts_sec, utc=True)
+    else:
+        idx = pd.to_datetime(np.asarray(exit_ts_sec), unit="s", utc=True)
     s = pd.Series(pnl_bp, index=idx)
-    traded_days = int(len(s.resample("1D").sum().dropna()))
-    full = s.resample("1D").sum().fillna(0.0)
-    if full.std() == 0 or len(full) < 3:
-        return 0.0, traded_days
-    return float(full.mean() / full.std() * np.sqrt(ppy)), traded_days
+    daily = s.resample("1D").sum()
+    if len(daily) < 3 or daily.std() == 0:
+        return 0.0, len(daily)
+    return float(daily.mean() / daily.std() * np.sqrt(ppy)), len(daily)
 
 
-def summarize(exit_ts, gross, net, cost):
-    sh_net, ndays = daily_sharpe(exit_ts, net)
-    sh_gross, _ = daily_sharpe(exit_ts, gross)
+def summarize(exit_ts, gross, net, cost, *, marks=None):
+    clock, gross_steps, net_steps = (exit_ts, gross, net) if marks is None else marks
+    sh_net, ndays = daily_sharpe(clock, net_steps)
+    sh_gross, _ = daily_sharpe(clock, gross_steps)
     n = len(net)
     return dict(
         n_trades=int(n),
@@ -213,7 +229,7 @@ def run_honest_oos(
     """
     Overfit IS net Sharpe over the grid, freeze the best config (>= min_trades_is
     trades), evaluate it ONCE out-of-sample. Returns a dict of IS/OOS stats plus
-    the frozen config and the per-trade OOS arrays for plotting.
+    the frozen config, the closed-trade ledger and per-bar OOS P&L increments.
     """
     def log(*a):
         if verbose:
@@ -222,7 +238,12 @@ def run_honest_oos(
     lob = lob.sort_index()
     mid, half_spread_bp, ofi_lvl, ts, spread = compute_ofi_arrays(lob)
     N = len(mid)
+    starts = clock_starts(lob.index)
+    breaks = np.zeros(N, dtype=bool)
+    breaks[starts] = True
+    segments = np.split(np.arange(N), starts[1:])
     split = int(N * is_frac)
+    is_clock, oos_clock = lob.index[:split], lob.index[split:]
     log(f"[split] N={N}  IS=[0,{split})  OOS=[{split},{N})")
 
     cumofi = {d: cum_ofi(ofi_lvl, d) for d in depths}
@@ -233,16 +254,16 @@ def run_honest_oos(
     for d in depths:
         base = cumofi[d]
         for sw in smooth_wins:
-            sm = causal_smooth(base, sw)
+            smooth_segments = [causal_smooth(base[part], sw) for part in segments]
             for zw in z_wins:
-                z = rolling_z(sm, zw)
+                z = np.concatenate([rolling_z(part, zw) for part in smooth_segments])
                 zcache[(d, sw, zw)] = z
                 for H in horizons:
                     for thr in thresholds:
-                        et, g, nt, c, dr = run_trades(
+                        et, g, nt, c, _, gross_steps, net_steps = _run_marked(
                             z, mid, half_spread_bp, ts, H, float(thr),
-                            commission_bp_rt, gap_s, 0, split)
-                        m = summarize(et, g, nt, c)
+                            commission_bp_rt, gap_s, 0, split, breaks)
+                        m = summarize(et, g, nt, c, marks=(is_clock, gross_steps, net_steps))
                         rows.append(dict(depth=d, smooth=sw, zwin=zw, horizon=H,
                                          thr=thr, **{f"is_{k}": v for k, v in m.items()}))
                         if m["n_trades"] >= min_trades_is:
@@ -258,9 +279,9 @@ def run_honest_oos(
         f"IS_net_Sharpe={is_sh:.4f} IS_trades={is_rec['n_trades']}")
 
     z = zcache[(d, sw, zw)]
-    et, g, nt, c, dr = run_trades(z, mid, half_spread_bp, ts, H, float(thr),
-                                  commission_bp_rt, gap_s, split, N)
-    oos = summarize(et, g, nt, c)
+    et, g, nt, c, dr, gross_steps, net_steps = _run_marked(
+        z, mid, half_spread_bp, ts, H, float(thr), commission_bp_rt, gap_s, split, N, breaks)
+    oos = summarize(et, g, nt, c, marks=(oos_clock, gross_steps, net_steps))
     gross_gt_cost = oos["avg_gross_bp"] > oos["avg_cost_bp"]
 
     if oos["sharpe_net"] > 0 and oos["n_trades"] >= min_trades_is and gross_gt_cost:
@@ -281,5 +302,6 @@ def run_honest_oos(
         gross_gt_cost=gross_gt_cost,
         verdict=verdict,
         is_sweep=is_df,
+        oos_marks=pd.DataFrame({"gross_bp": gross_steps, "net_bp": net_steps}, index=oos_clock),
         oos_trades=dict(exit_ts=et, gross_bp=g, net_bp=nt, cost_bp=c, direction=dr),
     )
