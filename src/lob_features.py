@@ -25,7 +25,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from .config import OFI_Z_WINDOW, N_LOB_LEVELS
+from .config import BAR_SECONDS, OFI_Z_WINDOW, N_LOB_LEVELS
 
 N_LEVELS = N_LOB_LEVELS
 
@@ -45,6 +45,19 @@ BID_PX = [f"bid_px_{i:02d}" for i in range(N_LEVELS)]
 ASK_PX = [f"ask_px_{i:02d}" for i in range(N_LEVELS)]
 BID_SZ = [f"bid_sz_{i:02d}" for i in range(N_LEVELS)]
 ASK_SZ = [f"ask_sz_{i:02d}" for i in range(N_LEVELS)]
+
+
+def clock_starts(index: pd.DatetimeIndex) -> np.ndarray:
+    """Row offsets where a new contiguous sequence of snapshots begins."""
+    if (not isinstance(index, pd.DatetimeIndex) or index.hasnans
+            or not index.is_unique or not index.is_monotonic_increasing):
+        raise ValueError("bar clock requires unique, increasing timestamps")
+    return np.flatnonzero(index.to_series().diff().ne(pd.Timedelta(seconds=BAR_SECONDS)))
+
+
+def _require_contiguous(index: pd.DatetimeIndex) -> None:
+    if len(clock_starts(index)) > 1:
+        raise ValueError("model bar clock has a gap; supply one contiguous segment")
 
 
 def per_level_ofi(lob: pd.DataFrame) -> list[pd.Series]:
@@ -101,6 +114,7 @@ def compute_features(lob: pd.DataFrame) -> pd.DataFrame:
     DataFrame containing FEATURE_NAMES + ['mid', 'spread_bps', 'ofi_z'].
     The extra three columns are used by the backtest, not fed to the model.
     """
+    _require_contiguous(lob.index)
     out = pd.DataFrame(index=lob.index)
 
     mid = (lob[BID_PX[0]] + lob[ASK_PX[0]]) / 2
@@ -148,6 +162,7 @@ def compute_labels(
     directional. This keeps the FLAT class honest and prevents the model from
     "predicting" sub-spread noise.
     """
+    _require_contiguous(mid.index)
     future_ret = mid.shift(-horizon) / mid - 1
     avg_spread_ret = (spread_bps / 10_000).rolling(120, min_periods=10).mean()
     threshold = spread_multiplier * avg_spread_ret

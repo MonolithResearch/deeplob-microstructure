@@ -63,10 +63,9 @@ TRAIN_STRIDE = 10
 
 # ── Honest backtest cost model ────────────────────────────────────────────────
 # The decisive, honest cost is crossing the real top-of-book half-spread to enter
-# and again to exit, plus a fixed commission. The headline result reported in the
-# README uses a 3x multiple of the measured retail round-trip cost.
+# and again to exit, plus a fixed round-trip commission.
 COMMISSION_BP_RT = 0.35           # round-trip commission in bp
-GAP_SECONDS = 15.0                # a dt > this invalidates OFI continuity / fwd P&L
+GAP_SECONDS = BAR_SECONDS         # maximum elapsed time between bars in a hold
 IS_FRAC = 0.65                    # 65% in-sample by time, 35% out-of-sample
 
 # ── Inference confidence filter ───────────────────────────────────────────────
